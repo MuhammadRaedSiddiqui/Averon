@@ -56,6 +56,8 @@ async function main() {
     if (opts.signature !== null) {
       headers["x-signature"] = opts.signature || sign(useBody);
     }
+    if (opts.vapiSecret) headers["x-vapi-secret"] = opts.vapiSecret;
+    if (opts.vapiSignature) headers["x-vapi-signature"] = opts.vapiSignature;
     const res = await fetch(`${base}${path}`, {
       method: "POST",
       headers,
@@ -77,6 +79,18 @@ async function main() {
 
   await call("no signature", "/webhook/northgate_dental/booking", { signature: null });
   await call("wrong signature", "/webhook/northgate_dental/booking", { signature: "deadbeef" });
+  await call("vapi shared secret", "/webhook/northgate_dental/booking", {
+    signature: null,
+    vapiSecret: process.env.WEBHOOK_SECRET,
+  });
+  await call("vapi wrong secret", "/webhook/northgate_dental/booking", {
+    signature: null,
+    vapiSecret: "not-the-secret",
+  });
+  await call("vapi signature", "/webhook/northgate_dental/booking", {
+    signature: null,
+    vapiSignature: `sha256=${sign(body)}`,
+  });
   await call("unknown capability", "/webhook/northgate_dental/teleport");
   await call("unknown client", "/webhook/nobody_co/booking");
   await call("enabled but unwired", "/webhook/unwired_co/booking");
@@ -91,6 +105,9 @@ async function main() {
     "GET /health": 200,
     "no signature": 401,
     "wrong signature": 401,
+    "vapi shared secret": 200,
+    "vapi wrong secret": 401,
+    "vapi signature": 200,
     "unknown capability": 404,
     "unknown client": 404,
     "enabled but unwired": 503,

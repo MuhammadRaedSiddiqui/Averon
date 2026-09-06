@@ -49,31 +49,59 @@ function makeTargetUrl(organizationId, capability) {
   ];
 }
 
+/** Constant-time string compare that tolerates differing lengths.
+ *
+ * timingSafeEqual throws when the buffers differ in size, so comparing
+ * lengths first is what keeps a malformed credential a 401 rather than a 500.
+ * The length of a rejected value is not a useful secret.
+ */
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+/**
+ * Authenticate an inbound webhook.
+ *
+ * Vapi sends one of two things, and neither is what this previously checked:
+ *
+ *   x-vapi-secret     the shared secret verbatim, from a tool's `server.secret`
+ *   x-vapi-signature  HMAC-SHA256 of the body, formatted `sha256=<hex>`
+ *
+ * The old middleware required `x-signature` holding a bare hex HMAC, which
+ * matched neither header nor either format, so every real tool call would
+ * have been rejected. `x-signature` is still accepted for callers that were
+ * written against it.
+ */
 function verifyHmac(req, res, next) {
   const secret = process.env.WEBHOOK_SECRET;
-  const signature = req.get("x-signature");
-
-  if (!secret || !signature) {
+  if (!secret) {
+    // Refusing is right, but say why: an unset secret is a deployment fault,
+    // not a caller's, and it is otherwise indistinguishable from a bad one.
+    console.error("WEBHOOK_SECRET is not set; rejecting all webhook requests");
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const payload = JSON.stringify(req.body || {});
-  const expected = crypto
-    .createHmac("sha256", secret)
-    .update(payload)
-    .digest("hex");
-
-  const given = Buffer.from(signature);
-  const want = Buffer.from(expected);
-
-  // timingSafeEqual throws when lengths differ, so a malformed signature
-  // would have surfaced as a 500 rather than a 401. Compare lengths first;
-  // the length of a rejected signature is not a useful secret.
-  if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) {
-    return res.status(401).json({ error: "Unauthorized" });
+  const shared = req.get("x-vapi-secret");
+  if (shared && safeEqual(shared, secret)) {
+    return next();
   }
 
-  return next();
+  const signature = req.get("x-vapi-signature") || req.get("x-signature");
+  if (signature) {
+    const expected = crypto
+      .createHmac("sha256", secret)
+      .update(JSON.stringify(req.body || {}))
+      .digest("hex");
+    // Vapi prefixes the digest; other callers send it bare.
+    const digest = signature.startsWith("sha256=") ? signature.slice(7) : signature;
+    if (safeEqual(digest, expected)) {
+      return next();
+    }
+  }
+
+  return res.status(401).json({ error: "Unauthorized" });
 }
 
 app.get("/health", (_req, res) => {
